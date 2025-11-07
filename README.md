@@ -2,6 +2,33 @@
 
 This project demonstrates a simple leader election pattern using Redis and .NET Aspire. It consists of a .NET Aspire host that orchestrates two instances of a web service. These services compete to become the "leader" by acquiring a lock in Redis.
 
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "Aspire Host (RedisPOC)"
+        AH[".NET Aspire Host"]
+        AH --> |orchestrates| R[Redis Container]
+        AH --> |launches| S1[myservice-1:5001]
+        AH --> |launches| S2[myservice-2:5002]
+    end
+    
+    subgraph "Service Instances"
+        S1 --> |connects to| R
+        S2 --> |connects to| R
+        S1 --> |uses| LES1[RedisLeaderElectionService]
+        S2 --> |uses| LES2[RedisLeaderElectionService]
+    end
+    
+    subgraph "Redis"
+        R --> |stores| LK[leader-lock key]
+        LK --> |expires in| EXP[10 seconds]
+    end
+    
+    U[User] --> |HTTP requests| S1
+    U --> |HTTP requests| S2
+```
+
 ## Project Structure
 
 -   **RedisPOC**: The .NET Aspire application host. It configures and launches the Redis cache and the service instances.
@@ -10,6 +37,43 @@ This project demonstrates a simple leader election pattern using Redis and .NET 
 ## How it Works
 
 The leader election is implemented using a simple locking mechanism in Redis.
+
+```mermaid
+sequenceDiagram
+    participant S1 as Service 1
+    participant S2 as Service 2
+    participant R as Redis
+    participant U as User
+    
+    Note over S1,R: Initial Leader Election
+    U->>S1: GET /
+    S1->>R: SET leader-lock=myservice-1 (NX, EX 10)
+    R-->>S1: OK (acquired lock)
+    S1-->>U: myservice-1 is now the LEADER
+    
+    Note over S1,R: Follower Attempt
+    U->>S2: GET /
+    S2->>R: SET leader-lock=myservice-2 (NX, EX 10)
+    R-->>S2: FAIL (key exists)
+    S2->>R: GET leader-lock
+    R-->>S2: myservice-1
+    S2-->>U: myservice-2 is a FOLLOWER. Current leader: myservice-1
+    
+    Note over S1,R: Leadership Renewal
+    U->>S1: GET /
+    S1->>R: GET leader-lock
+    R-->>S1: myservice-1
+    S1->>R: SET leader-lock=myservice-1 (EX 10)
+    R-->>S1: OK
+    S1-->>U: myservice-1 is the LEADER, leadership renewed
+    
+    Note over S1,R: Lock Expiration & New Election
+    Note over R: Lock expires after 10 seconds
+    U->>S2: GET /
+    S2->>R: SET leader-lock=myservice-2 (NX, EX 10)
+    R-->>S2: OK (lock expired, acquired)
+    S2-->>U: myservice-2 is now the LEADER
+```
 
 1.  **Acquiring Leadership**: A service instance attempts to set a specific key (`leader-lock`) in Redis with its own unique instance ID. This operation is set to only succeed if the key does not already exist (`When.NotExists`). The key is created with a short expiry time (e.g., 10 seconds). The first instance to successfully set the key becomes the leader.
 
